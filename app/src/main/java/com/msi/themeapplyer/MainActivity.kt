@@ -1,9 +1,10 @@
 package com.msi.themeapplyer
 
 import android.Manifest
-import android.content.ComponentName
+import android.app.WallpaperManager
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -18,7 +19,6 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.FileOutputStream
-import java.io.InputStream
 import java.util.zip.ZipInputStream
 
 class MainActivity : AppCompatActivity() {
@@ -32,7 +32,6 @@ class MainActivity : AppCompatActivity() {
     private var selectedMtzUri: Uri? = null
     private var selectedFileName: String = "custom_theme.mtz"
 
-    // File Picker Launcher
     private val pickMtzLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
             selectedMtzUri = uri
@@ -41,7 +40,7 @@ class MainActivity : AppCompatActivity() {
                 selectedFileName = fileName
                 tvSelectedFile.text = "Selected: $selectedFileName"
                 btnApplyTheme.isEnabled = true
-                tvStatus.text = "Status: Ready to apply!"
+                tvStatus.text = "Status: Ready to apply theme contents!"
             } else {
                 Toast.makeText(this, "Please select a valid .mtz file!", Toast.LENGTH_SHORT).show()
                 btnApplyTheme.isEnabled = false
@@ -65,7 +64,6 @@ class MainActivity : AppCompatActivity() {
 
         btnSelectMtz.setOnClickListener {
             if (hasStoragePermission()) {
-                // Open file manager to pick .mtz
                 pickMtzLauncher.launch(arrayOf("*/*"))
             } else {
                 Toast.makeText(this, "Grant Storage Permission First!", Toast.LENGTH_SHORT).show()
@@ -75,7 +73,7 @@ class MainActivity : AppCompatActivity() {
 
         btnApplyTheme.setOnClickListener {
             selectedMtzUri?.let { uri ->
-                importAndApplyMtz(uri, selectedFileName)
+                processAndApplyTheme(uri, selectedFileName)
             }
         }
     }
@@ -113,16 +111,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun importAndApplyMtz(uri: Uri, fileName: String) {
+    private fun processAndApplyTheme(uri: Uri, fileName: String) {
         try {
-            tvStatus.text = "Status: Extracting & Importing Theme..."
+            tvStatus.text = "Status: Processing .mtz file..."
 
-            // 1. Copy .mtz to MIUI/theme directory
+            // 1. Save .mtz file to MIUI/theme directory so it's stored properly
             val miuiThemeDir = File(Environment.getExternalStorageDirectory(), "MIUI/theme")
             if (!miuiThemeDir.exists()) {
                 miuiThemeDir.mkdirs()
             }
-
             val destFile = File(miuiThemeDir, fileName)
             contentResolver.openInputStream(uri)?.use { inputStream ->
                 FileOutputStream(destFile).use { outputStream ->
@@ -130,17 +127,22 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            // 2. Also extract internal components (icons, wallpaper, lockscreen) to cache for preview/direct apply
+            // 2. Extract contents in cache to look for Wallpapers or Icons
             val extractDir = File(cacheDir, "extracted_theme")
             if (extractDir.exists()) extractDir.deleteRecursively()
             extractDir.mkdirs()
             unzipMtz(destFile, extractDir)
 
-            tvStatus.text = "Status: Imported to ${destFile.absolutePath}\nOpening Theme Manager..."
-            Toast.makeText(this, "Theme Imported! Select it in Theme Manager to Apply.", Toast.LENGTH_LONG).show()
+            // 3. Try to apply wallpaper directly from the extracted theme if available
+            val wallpaperApplied = applyExtractedWallpaper(extractDir)
 
-            // 3. Launch MIUI Theme Manager directly to Local Themes section
-            openMiuiThemeManager(destFile)
+            if (wallpaperApplied) {
+                tvStatus.text = "Status: Theme imported & Wallpaper applied successfully!\n(Note: Icon/System changes require MIUI Theme Manager restrictions)"
+                Toast.makeText(this, "Wallpaper applied successfully!", Toast.LENGTH_LONG).show()
+            } else {
+                tvStatus.text = "Status: Theme saved to MIUI/theme/ successfully!"
+                Toast.makeText(this, "Theme saved successfully!", Toast.LENGTH_LONG).show()
+            }
 
         } catch (e: Exception) {
             tvStatus.text = "Error: ${e.message}"
@@ -166,27 +168,37 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun openMiuiThemeManager(mtzFile: File) {
+    private fun applyExtractedWallpaper(extractDir: File): Boolean {
         try {
-            // Try opening MIUI Theme Manager directly with the .mtz file
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(Uri.fromFile(mtzFile), "application/mtz")
-                component = ComponentName(
-                    "com.android.thememanager",
-                    "com.android.thememanager.ApplyThemeForScreenshot"
-                )
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // Common paths inside .mtz files where wallpapers are stored
+            val possibleWallpaperPaths = listOf(
+                "wallpaper/default_wallpaper",
+                "wallpaper/wallpaper.jpg",
+                "wallpaper/lock_wallpaper",
+                "default_lock_wallpaper"
+            )
+
+            var wallpaperFile: File? = null
+            
+            // Search recursively for any image file inside the extracted theme folder
+            extractDir.walkTopDown().forEach { file ->
+                if (file.isFile && (file.name.endsWith(".jpg") || file.name.endsWith(".png"))) {
+                    if (wallpaperFile == null) {
+                        wallpaperFile = file
+                    }
+                }
             }
-            startActivity(intent)
+
+            if (wallpaperFile != null && wallpaperFile!!.exists()) {
+                val bitmap = BitmapFactory.decodeFile(wallpaperFile!!.absolutePath)
+                val wallpaperManager = WallpaperManager.getInstance(applicationContext)
+                wallpaperManager.setBitmap(bitmap)
+                return true
+            }
         } catch (e: Exception) {
-            // Fallback: Open main MIUI Theme Manager app
-            val fallbackIntent = packageManager.getLaunchIntentForPackage("com.android.thememanager")
-            if (fallbackIntent != null) {
-                startActivity(fallbackIntent)
-            } else {
-                tvStatus.text = "Status: Theme saved to MIUI/theme/. MIUI Theme Manager not found on this device."
-            }
+            e.printStackTrace()
         }
+        return false
     }
 
     private fun getFileNameFromUri(uri: Uri): String {
