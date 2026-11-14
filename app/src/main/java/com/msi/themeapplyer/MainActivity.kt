@@ -17,6 +17,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import java.io.File
 import java.io.FileOutputStream
 import java.util.zip.ZipInputStream
@@ -31,6 +32,7 @@ class MainActivity : AppCompatActivity() {
 
     private var selectedMtzUri: Uri? = null
     private var selectedFileName: String = "custom_theme.mtz"
+    private var savedMtzFile: File? = null
 
     private val pickMtzLauncher = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
         if (uri != null) {
@@ -40,7 +42,7 @@ class MainActivity : AppCompatActivity() {
                 selectedFileName = fileName
                 tvSelectedFile.text = "Selected: $selectedFileName"
                 btnApplyTheme.isEnabled = true
-                tvStatus.text = "Status: Ready to apply theme contents!"
+                tvStatus.text = "Status: Ready to process theme!"
             } else {
                 Toast.makeText(this, "Please select a valid .mtz file!", Toast.LENGTH_SHORT).show()
                 btnApplyTheme.isEnabled = false
@@ -113,40 +115,56 @@ class MainActivity : AppCompatActivity() {
 
     private fun processAndApplyTheme(uri: Uri, fileName: String) {
         try {
-            tvStatus.text = "Status: Processing .mtz file..."
+            tvStatus.text = "Status: Saving .mtz file to MIUI/theme..."
 
-            // 1. Save .mtz file to MIUI/theme directory so it's stored properly
+            // 1. Save .mtz file to MIUI/theme directory
             val miuiThemeDir = File(Environment.getExternalStorageDirectory(), "MIUI/theme")
             if (!miuiThemeDir.exists()) {
                 miuiThemeDir.mkdirs()
             }
-            val destFile = File(miuiThemeDir, fileName)
+            savedMtzFile = File(miuiThemeDir, fileName)
             contentResolver.openInputStream(uri)?.use { inputStream ->
-                FileOutputStream(destFile).use { outputStream ->
+                FileOutputStream(savedMtzFile!!).use { outputStream ->
                     inputStream.copyTo(outputStream)
                 }
             }
 
-            // 2. Extract contents in cache to look for Wallpapers or Icons
+            // 2. Extract contents in cache to look for Wallpapers as backup
             val extractDir = File(cacheDir, "extracted_theme")
             if (extractDir.exists()) extractDir.deleteRecursively()
             extractDir.mkdirs()
-            unzipMtz(destFile, extractDir)
+            unzipMtz(savedMtzFile!!, extractDir)
 
-            // 3. Try to apply wallpaper directly from the extracted theme if available
-            val wallpaperApplied = applyExtractedWallpaper(extractDir)
+            // 3. Try to apply wallpaper as a secondary feature
+            applyExtractedWallpaper(extractDir)
 
-            if (wallpaperApplied) {
-                tvStatus.text = "Status: Theme imported & Wallpaper applied successfully!\n(Note: Icon/System changes require MIUI Theme Manager restrictions)"
-                Toast.makeText(this, "Wallpaper applied successfully!", Toast.LENGTH_LONG).show()
-            } else {
-                tvStatus.text = "Status: Theme saved to MIUI/theme/ successfully!"
-                Toast.makeText(this, "Theme saved successfully!", Toast.LENGTH_LONG).show()
-            }
+            // 4. Try launching MIUI Theme Manager / Send file to Theme app
+            openInThemeManager(savedMtzFile!!)
+
+            tvStatus.text = "Status: Theme saved! Opening Theme Manager..."
+            Toast.makeText(this, "Theme imported successfully!", Toast.LENGTH_LONG).show()
 
         } catch (e: Exception) {
             tvStatus.text = "Error: ${e.message}"
             Toast.makeText(this, "Failed: ${e.message}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun openInThemeManager(file: File) {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(
+                    FileProvider.getUriForFile(this@MainActivity, "$packageName.fileprovider", file),
+                    "application/zip" // MIUI themes are zip/mtz formats
+                )
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            // Try launching chooser so user can pick Xiaomi Theme App or File Manager
+            val chooser = Intent.createChooser(intent, "Open Theme with")
+            startActivity(chooser)
+        } catch (e: Exception) {
+            // Fallback if fileprovider fails
+            Toast.makeText(this, "Saved in MIUI/theme folder. Open Xiaomi Themes app to apply.", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -168,19 +186,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun applyExtractedWallpaper(extractDir: File): Boolean {
+    private fun applyExtractedWallpaper(extractDir: File) {
         try {
-            // Common paths inside .mtz files where wallpapers are stored
-            val possibleWallpaperPaths = listOf(
-                "wallpaper/default_wallpaper",
-                "wallpaper/wallpaper.jpg",
-                "wallpaper/lock_wallpaper",
-                "default_lock_wallpaper"
-            )
-
             var wallpaperFile: File? = null
-            
-            // Search recursively for any image file inside the extracted theme folder
             extractDir.walkTopDown().forEach { file ->
                 if (file.isFile && (file.name.endsWith(".jpg") || file.name.endsWith(".png"))) {
                     if (wallpaperFile == null) {
@@ -193,12 +201,10 @@ class MainActivity : AppCompatActivity() {
                 val bitmap = BitmapFactory.decodeFile(wallpaperFile!!.absolutePath)
                 val wallpaperManager = WallpaperManager.getInstance(applicationContext)
                 wallpaperManager.setBitmap(bitmap)
-                return true
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
-        return false
     }
 
     private fun getFileNameFromUri(uri: Uri): String {
